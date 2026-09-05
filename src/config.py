@@ -1,20 +1,22 @@
-"""AML rule weights form a 100-point prioritisation score.
-The score is not a probability that money laundering has occurred.
-"""
+INITIAL_CUSTOMER_BASELINE_NOK = 1_000.0
 
 RULES = {
- "unusual_amount": {"label": "Unusual amount", "weight": 35},
- "high_risk_jurisdiction": {
- "label": "High-risk jurisdiction", "weight": 30
- },
- "high_velocity": {
- "label": "High transaction velocity", "weight": 20
- },
- "new_counterparty": {
- "label": "New counterparty with elevated amount", "weight": 15
- },
+    "unusual_amount": {
+        "label": "Unusual amount",
+        "weight": 35,
+    },
+    "high_risk_country": {
+        "label": "High-risk country",
+        "weight": 30,
+    },
+    "rapid_activity": {
+        "label": "Rapid transaction activity",
+        "weight": 20,
+    },
+    "new_recipient": {
+        "label": "New recipient",
+        "weight": 15,
+    },
 }
 
-
-RISK_LEVEL = ["Low", "Medium", "High"]
-RISK_COLORS = { "Low" :  "#5D8A83", "Medium": "#F2B84B", "High": "#E05B5B" }
+RISK_LEVELS = ("Low", "Medium", "High")

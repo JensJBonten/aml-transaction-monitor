@@ -1,106 +1,136 @@
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import deque
+from datetime import timedelta
 
-import numpy as np
 import pandas as pd
 
-DEFAULT_BASELINE_AMOUNT = 1_000.0
+from src.config import INITIAL_CUSTOMER_BASELINE_NOK
 
 
-def add_customer_risk_features(transactions: pd.DataFrame) -> pd.DataFrame:
+def add_customer_risk_features(
+    transactions: pd.DataFrame,
+) -> pd.DataFrame:
     """
-    Compare each transaction with the customer's previous behaviour.
+    Compare each transaction with the customer's earlier activity.
 
-    The function adds:
-    - customer_median_amount
-    - amount_ratio_to_baseline
-    - transactions_last_60m
+    Only information available before the transaction is used when
+    calculating the customer's normal amount.
     """
-
     result = transactions.copy()
     result["timestamp"] = pd.to_datetime(result["timestamp"])
+    result["_original_order"] = range(len(result))
 
-    # Feature calculations must happen chronologically, if not
-    # transactions done in the future can influence earlier ones.
     result = result.sort_values(
-        ["timestamp", "customer_id"],
-        kind="mergesort",
-    ).reset_index(drop=True)
-
-    result["customer_median_amount"] = _historical_baselines(result)
-
-    # Expresses amount relative to the customers historical baseline.
-    result["amount_ratio_to_baseline"] = result["amount_nok"] / result[
-        "customer_median_amount"
-    ].clip(lower=1)
-
-    result["transactions_last_60m"] = (
-        result.groupby("customer_id")["timestamp"]
-        .transform(_count_transactions_in_last_60_minutes)
-        .astype(int)
+        [
+            "customer_id",
+            "timestamp",
+            "transaction_id",
+        ]
     )
 
-    result = result.sort_values(
-        ["timestamp", "customer_id"],
-        ascending=[False, True],
-        kind="mergesort",
-    ).reset_index(drop=True)
+    baseline_parts: list[pd.Series] = []
+    recent_count_parts: list[pd.Series] = []
 
-    return result
+    for _, customer_transactions in result.groupby("customer_id"):
+        baseline_parts.append(
+            _historical_amount_baseline(customer_transactions)
+        )
+
+        recent_count_parts.append(
+            _count_transactions_in_60_minutes(
+                customer_transactions["timestamp"]
+            )
+        )
+
+    result["customer_median_amount"] = pd.concat(
+        baseline_parts
+    ).reindex(result.index)
+
+    result["amount_ratio_to_baseline"] = (
+        result["amount_nok"]
+        / result["customer_median_amount"].clip(lower=1)
+    )
+
+    result["transactions_last_60m"] = (
+        pd.concat(recent_count_parts)
+        .reindex(result.index)
+        .astype("int64")
+    )
+
+    # The dashboard displays the newest transactions first.
+    return (
+        result.sort_values(
+            [
+                "timestamp",
+                "transaction_id",
+            ],
+            ascending=[
+                False,
+                False,
+            ],
+        )
+        .drop(columns="_original_order")
+        .reset_index(drop=True)
+    )
 
 
-def _historical_baselines(transactions: pd.DataFrame) -> pd.Series:
-    """Calculate baselines from transactions with an earlier timestamp."""
-    baselines = pd.Series(index=transactions.index, dtype="float64")
-    global_history: list[float] = []
-    customer_history: defaultdict[str, list[float]] = defaultdict(list)
-
-    # Rows sharing a timestamp are evaluated before any of their amounts are
-    # added to history, so simultaneous transactions cannot affect each other.
-    for _, timestamp_rows in transactions.groupby("timestamp", sort=False):
-        for index, transaction in timestamp_rows.iterrows():
-            previous_customer_amounts = customer_history[transaction["customer_id"]]
-
-            if len(previous_customer_amounts) >= 5:
-                baseline = float(np.median(previous_customer_amounts))
-            elif global_history:
-                baseline = float(np.median(global_history))
-            else:
-                baseline = DEFAULT_BASELINE_AMOUNT
-
-            baselines.at[index] = baseline
-
-        for _, transaction in timestamp_rows.iterrows():
-            amount = transaction["amount_nok"]
-            if pd.notna(amount):
-                numeric_amount = float(amount)
-                global_history.append(numeric_amount)
-                customer_history[transaction["customer_id"]].append(numeric_amount)
-
-    return baselines
-
-
-def _count_transactions_in_last_60_minutes(
-    timestamps: pd.Series,
+def _historical_amount_baseline(
+    customer_transactions: pd.DataFrame,
 ) -> pd.Series:
     """
-    Count transactions inside a rolling 60-minute window.
+    Calculate the median using only transactions from earlier timestamps.
 
-    `left` marks the oldest transaction still inside the window.
-    `right` represents the transaction currently being evaluated.
+    Transactions recorded at the same time receive the same baseline and
+    cannot influence each other's result.
     """
+    baseline_parts: list[pd.Series] = []
+    historical_amounts: list[float] = []
 
+    for _, same_time_transactions in customer_transactions.groupby(
+        "timestamp",
+        sort=True,
+    ):
+        if len(historical_amounts) >= 5:
+            baseline = float(
+                pd.Series(historical_amounts).median()
+            )
+        else:
+            baseline = INITIAL_CUSTOMER_BASELINE_NOK
+
+        baseline_parts.append(
+            pd.Series(
+                baseline,
+                index=same_time_transactions.index,
+                dtype="float64",
+            )
+        )
+
+        historical_amounts.extend(
+            same_time_transactions["amount_nok"].astype(float)
+        )
+
+    return pd.concat(baseline_parts).reindex(
+        customer_transactions.index
+    )
+
+
+def _count_transactions_in_60_minutes(
+    timestamps: pd.Series,
+) -> pd.Series:
+    timestamps_in_window: deque[pd.Timestamp] = deque()
     counts: list[int] = []
-    left = 0
-    window = pd.Timedelta(minutes=60)
+    window = timedelta(minutes=60)
 
-    for right, current_timestamp in enumerate(timestamps):
-        # Moving the window start past transactions older than 60 min.
-        while current_timestamp - timestamps.iloc[left] > window:
-            left += 1
-        # Invluide both the frist and current transaction in the count.
-        counts.append(right - left + 1)
+    for timestamp in timestamps:
+        while (
+            timestamps_in_window
+            and timestamp - timestamps_in_window[0] > window
+        ):
+            timestamps_in_window.popleft()
+
+        timestamps_in_window.append(timestamp)
+        counts.append(len(timestamps_in_window))
 
     return pd.Series(
         counts,
