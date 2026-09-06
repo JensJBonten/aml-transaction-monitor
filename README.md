@@ -1,5 +1,7 @@
 # Transaction Risk Monitor
 
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://transaction-risk-monitor.streamlit.app/)
+
 A small Streamlit project for reviewing generated transaction data.
 
 The application checks transactions against a set of simple risk rules and places matching transactions in a review queue. Each case shows which rules were triggered and how the score was calculated.
